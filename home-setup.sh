@@ -14,6 +14,30 @@ XRAY_PORT=41792
 SSH_PORT=22222
 REALITY_DEST="www.microsoft.com:443"
 REALITY_SNI="www.microsoft.com"
+XRAY_CONFIG="/usr/local/etc/xray/config.json"
+
+###############################################################################
+# PARSE FLAGS
+###############################################################################
+ROTATE_CREDS=false
+SSH_PUBKEY=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --rotate)
+            ROTATE_CREDS=true
+            shift
+            ;;
+        --ssh-pubkey)
+            SSH_PUBKEY="$2"
+            shift 2
+            ;;
+        *)
+            echo "Unknown option: $1"
+            echo "Usage: sudo bash $0 [--rotate] [--ssh-pubkey <key-string>]"
+            exit 1
+            ;;
+    esac
+done
 
 ###############################################################################
 # PRE-FLIGHT
@@ -70,29 +94,50 @@ else
 fi
 
 ###############################################################################
-# GENERATE CREDENTIALS
+# CREDENTIALS — reuse existing or generate new
 ###############################################################################
 echo ""
-echo "=== Generating credentials ==="
-UUID=$(xray uuid)
-KEYS=$(xray x25519)
-PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
-PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
-SHORT_ID=$(openssl rand -hex 4)
+mkdir -p /usr/local/etc/xray
+mkdir -p /var/log/xray
 
-echo "UUID:        ${UUID}"
-echo "Public Key:  ${PUBLIC_KEY}"
-echo "Short ID:    ${SHORT_ID}"
+if [[ -f "$XRAY_CONFIG" ]] && ! $ROTATE_CREDS; then
+    echo "=== Reusing existing Xray credentials ==="
+    UUID=$(grep -o '"id": *"[^"]*"' "$XRAY_CONFIG" | head -1 | sed 's/.*"\([^"]*\)"/\1/')
+    PRIVATE_KEY=$(grep -o '"privateKey": *"[^"]*"' "$XRAY_CONFIG" | head -1 | sed 's/.*"\([^"]*\)"/\1/')
+    SHORT_ID=$(grep -o '"shortIds": *\["[^"]*"\]' "$XRAY_CONFIG" | head -1 | sed 's/.*\["\([^"]*\)"\]/\1/')
+    PUBLIC_KEY=$(xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep "Public key:" | awk '{print $3}')
+
+    if [[ -z "$UUID" || -z "$PRIVATE_KEY" || -z "$SHORT_ID" || -z "$PUBLIC_KEY" ]]; then
+        echo "WARNING: Could not extract credentials from existing config. Generating new ones."
+        ROTATE_CREDS=true
+    else
+        echo "UUID:        ${UUID}"
+        echo "Public Key:  ${PUBLIC_KEY}"
+        echo "Short ID:    ${SHORT_ID}"
+        echo "(Use --rotate to generate fresh credentials)"
+    fi
+fi
+
+if [[ ! -f "$XRAY_CONFIG" ]] || $ROTATE_CREDS; then
+    echo "=== Generating new credentials ==="
+    UUID=$(xray uuid)
+    KEYS=$(xray x25519)
+    PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
+    PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
+    SHORT_ID=$(openssl rand -hex 4)
+
+    echo "UUID:        ${UUID}"
+    echo "Public Key:  ${PUBLIC_KEY}"
+    echo "Short ID:    ${SHORT_ID}"
+fi
 
 ###############################################################################
 # WRITE XRAY CONFIG
 ###############################################################################
 echo ""
 echo "=== Writing xray config ==="
-mkdir -p /usr/local/etc/xray
-mkdir -p /var/log/xray
 
-cat > /usr/local/etc/xray/config.json << XEOF
+cat > "$XRAY_CONFIG" << XEOF
 {
   "log": {
     "loglevel": "warning",
@@ -136,9 +181,9 @@ cat > /usr/local/etc/xray/config.json << XEOF
 }
 XEOF
 
-chown nobody:nogroup /usr/local/etc/xray/config.json 2>/dev/null \
-    || chown nobody:nobody /usr/local/etc/xray/config.json
-chmod 600 /usr/local/etc/xray/config.json
+chown nobody:nogroup "$XRAY_CONFIG" 2>/dev/null \
+    || chown nobody:nobody "$XRAY_CONFIG"
+chmod 600 "$XRAY_CONFIG"
 
 ###############################################################################
 # SYSTEMD SERVICE
@@ -239,7 +284,11 @@ ufw status verbose
 echo ""
 echo "=== Configuring SSH ==="
 SSHD_CFG=/etc/ssh/sshd_config
+REAL_USER=${SUDO_USER:-$(logname 2>/dev/null || echo root)}
+REAL_HOME=$(eval echo "~${REAL_USER}")
+AUTHORIZED_KEYS="${REAL_HOME}/.ssh/authorized_keys"
 
+# Ensure non-standard port is configured
 if ! grep -q "^Port ${SSH_PORT}" "$SSHD_CFG"; then
     if grep -q "^Port " "$SSHD_CFG"; then
         sed -i "/^Port /a Port ${SSH_PORT}" "$SSHD_CFG"
@@ -250,51 +299,57 @@ if ! grep -q "^Port ${SSH_PORT}" "$SSHD_CFG"; then
         echo "Port ${SSH_PORT}" >> "$SSHD_CFG"
     fi
 fi
-
 sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSHD_CFG"
 
-# Check if SSH keys are already in place for hardening
-REAL_USER=${SUDO_USER:-$(logname 2>/dev/null || echo root)}
-REAL_HOME=$(eval echo "~${REAL_USER}")
-AUTHORIZED_KEYS="${REAL_HOME}/.ssh/authorized_keys"
+# Ensure .ssh directory and authorized_keys exist
+mkdir -p "${REAL_HOME}/.ssh"
+touch "$AUTHORIZED_KEYS"
+chmod 700 "${REAL_HOME}/.ssh"
+chmod 600 "$AUTHORIZED_KEYS"
+chown -R "${REAL_USER}:${REAL_USER}" "${REAL_HOME}/.ssh"
 
-if [[ -f "$AUTHORIZED_KEYS" ]] && [[ -s "$AUTHORIZED_KEYS" ]]; then
-    echo ""
-    echo "SSH authorized_keys file exists and is non-empty."
-    echo "You can now complete SSH hardening (disable password auth, close port 22)."
-    echo ""
-    read -rp "Complete SSH hardening now? [y/N]: " harden_now
-    harden_now=${harden_now:-N}
-
-    if [[ "$harden_now" =~ ^[Yy]$ ]]; then
-        # Remove Port 22, keep only non-standard port
-        sed -i '/^Port 22$/d' "$SSHD_CFG"
-        # Disable password authentication
-        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_CFG"
-        systemctl restart sshd || systemctl restart ssh
-        # Remove UFW rule for port 22
-        ufw delete allow 22/tcp 2>/dev/null || true
-        echo "SSH hardening complete: port 22 closed, password auth disabled."
+# Install SSH public key if provided via --ssh-pubkey or interactive paste
+HAS_KEY=false
+if [[ -n "$SSH_PUBKEY" ]]; then
+    if ! grep -qF "$SSH_PUBKEY" "$AUTHORIZED_KEYS"; then
+        echo "$SSH_PUBKEY" >> "$AUTHORIZED_KEYS"
+        echo "SSH public key installed from --ssh-pubkey flag"
     else
-        systemctl restart sshd || systemctl restart ssh
-        echo "SSH hardening skipped. Ports 22 and ${SSH_PORT} remain open."
-        echo ""
-        echo ">>> To complete hardening later, re-run this script and choose 'y'."
-        echo ">>> Or manually: remove 'Port 22' from ${SSHD_CFG},"
-        echo ">>>              set 'PasswordAuthentication no',"
-        echo ">>>              run 'sudo ufw delete allow 22/tcp',"
-        echo ">>>              run 'sudo systemctl restart sshd'."
+        echo "SSH public key already present in authorized_keys"
     fi
+    HAS_KEY=true
+elif [[ -f "$AUTHORIZED_KEYS" ]] && [[ -s "$AUTHORIZED_KEYS" ]]; then
+    HAS_KEY=true
+    echo "Existing SSH keys found in authorized_keys"
+else
+    echo ""
+    echo "No SSH public key found. You can paste your Mac's public key now,"
+    echo "or press Enter to skip (port 22 will remain open temporarily)."
+    echo ""
+    read -rp "Paste Mac SSH public key (or Enter to skip): " PASTED_KEY
+    if [[ -n "$PASTED_KEY" ]]; then
+        echo "$PASTED_KEY" >> "$AUTHORIZED_KEYS"
+        echo "SSH public key installed"
+        HAS_KEY=true
+    fi
+fi
+
+# Harden SSH if we have a key, or leave port 22 open as temporary bootstrap
+if $HAS_KEY; then
+    sed -i '/^Port 22$/d' "$SSHD_CFG"
+    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_CFG"
+    systemctl restart sshd || systemctl restart ssh
+    ufw delete allow 22/tcp 2>/dev/null || true
+    echo "SSH hardening complete: port 22 closed, password auth disabled"
+    echo "SSH listening on port ${SSH_PORT} only (key-based auth)"
 else
     systemctl restart sshd || systemctl restart ssh
-    echo "SSH listening on ports 22 and ${SSH_PORT}"
     echo ""
-    echo ">>> SSH keys not yet configured. Complete these steps:"
-    echo ">>>   1. Copy your public key: ssh-copy-id -p ${SSH_PORT} ${REAL_USER}@${PUBLIC_IP}"
-    echo ">>>   2. Re-run this script to complete hardening (disable password auth, close port 22)"
-    echo ""
-    echo ">>> NOTE: SSH key bootstrap requires physical access or temporary"
-    echo ">>>       password auth before the tunnel is operational."
+    echo "WARNING: SSH hardening NOT complete (AC-10 not satisfied)"
+    echo "  Port 22 is open and password auth is enabled as a temporary bootstrap."
+    echo "  To finish hardening, rerun with: sudo bash $0 --ssh-pubkey '<your-key>'"
+    echo "  Or: ssh-copy-id -p ${SSH_PORT} ${REAL_USER}@${PUBLIC_IP}"
+    echo "       then: sudo bash $0"
 fi
 
 ###############################################################################
@@ -355,25 +410,18 @@ systemctl enable --now xray-health.timer
 echo "Health check timer active — view: journalctl -u xray-health"
 
 ###############################################################################
-# SSH KEY BOOTSTRAP — ensure authorized_keys exists with correct permissions
+# SSH KEY PERMISSIONS — final verification
 ###############################################################################
-echo ""
-echo "=== SSH key bootstrap ==="
-REAL_USER=${SUDO_USER:-$(logname 2>/dev/null || echo root)}
-REAL_HOME=$(eval echo "~${REAL_USER}")
-mkdir -p "${REAL_HOME}/.ssh"
-touch "${REAL_HOME}/.ssh/authorized_keys"
-chmod 700 "${REAL_HOME}/.ssh"
-chmod 600 "${REAL_HOME}/.ssh/authorized_keys"
 chown -R "${REAL_USER}:${REAL_USER}" "${REAL_HOME}/.ssh"
-echo "Ensured ${REAL_HOME}/.ssh/authorized_keys exists with chmod 600"
+chmod 600 "$AUTHORIZED_KEYS"
 
 ###############################################################################
 # SECRETS.MD — document credential generation procedure
 ###############################################################################
 echo ""
 echo "=== Generating SECRETS.md ==="
-SECRETS_FILE="${REAL_HOME}/SECRETS.md"
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+SECRETS_FILE="${SCRIPT_DIR}/SECRETS.md"
 cat > "$SECRETS_FILE" << SDEOF
 # Credential Generation Procedure
 
@@ -386,7 +434,7 @@ Value: ${UUID}
 ## REALITY x25519 Keypair
 Command: \`xray x25519\`
 Public Key: ${PUBLIC_KEY}
-Private Key: stored in /usr/local/etc/xray/config.json (chmod 600)
+Private Key: stored in ${XRAY_CONFIG} (chmod 600)
 
 ## REALITY Short ID
 Command: \`openssl rand -hex 4\`
@@ -397,17 +445,16 @@ Generated on Mac client via: \`ssh-keygen -t ed25519\`
 Authorized keys file: ${REAL_HOME}/.ssh/authorized_keys (chmod 600)
 
 ## File Permissions
-- /usr/local/etc/xray/config.json: 600, owned by nobody
+- ${XRAY_CONFIG}: 600, owned by nobody
 - ${REAL_HOME}/.ssh/authorized_keys: 600, owned by ${REAL_USER}
 - /root/mac-setup-values.txt: 600, owned by root — DELETE after Mac setup
 
 ## Regeneration
-To rotate credentials, re-run home-setup.sh. Update mac-setup.sh config block
-and Clash V-Ninja config with new values.
+To rotate credentials: sudo bash home-setup.sh --rotate
+Then update mac-setup.sh config block and Clash V-Ninja config with new values.
 SDEOF
 chmod 600 "$SECRETS_FILE"
-chown "${REAL_USER}:${REAL_USER}" "$SECRETS_FILE"
-echo "SECRETS.md written to ${SECRETS_FILE} (chmod 600)"
+echo "SECRETS.md written to ${SECRETS_FILE} (chmod 600, gitignored)"
 
 ###############################################################################
 # SAVE VALUES
