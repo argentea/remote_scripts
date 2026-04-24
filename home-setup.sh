@@ -51,7 +51,22 @@ echo "=== Installing xray-core ==="
 if command -v xray &>/dev/null; then
     echo "xray already installed: $(xray version | head -1)"
 else
-    bash -c "$(curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh)" @ install
+    # Pin to a known commit for supply-chain safety
+    XRAY_INSTALL_COMMIT="4eef24ea4151598e36a0c5b169f8e322a0e9d4a8"
+    XRAY_INSTALL_URL="https://github.com/XTLS/Xray-install/raw/${XRAY_INSTALL_COMMIT}/install-release.sh"
+
+    TMPSCRIPT=$(mktemp)
+    curl -fsSL "$XRAY_INSTALL_URL" -o "$TMPSCRIPT"
+
+    # Verify the script was downloaded successfully
+    if [[ ! -s "$TMPSCRIPT" ]]; then
+        echo "ERROR: Failed to download Xray install script"
+        rm -f "$TMPSCRIPT"
+        exit 1
+    fi
+
+    bash "$TMPSCRIPT" install
+    rm -f "$TMPSCRIPT"
 fi
 
 ###############################################################################
@@ -170,7 +185,8 @@ systemctl restart xray
 sleep 2
 
 if systemctl is-active --quiet xray; then
-    echo "xray service: active"
+    echo "xray service: active (Restart=always — restarts on crash, auto-starts on boot)"
+    echo "  Test: sudo kill -9 \$(pidof xray) → service should restart within 5s"
 else
     echo "ERROR: xray service failed to start"
     systemctl status xray --no-pager
@@ -208,15 +224,17 @@ echo "Lid-close ignored; sleep/suspend/hibernate masked"
 ###############################################################################
 echo ""
 echo "=== Configuring UFW ==="
+ufw default deny incoming
+ufw default allow outgoing
 ufw allow "${XRAY_PORT}/tcp" comment 'Xray VLESS+REALITY'
 ufw allow "${SSH_PORT}/tcp" comment 'SSH non-standard'
-ufw allow 22/tcp comment 'SSH standard — remove after confirming non-standard port works'
+ufw allow 22/tcp comment 'SSH standard — TEMPORARY: remove after confirming non-standard port + key auth'
 ufw --force enable
 echo ""
-ufw status numbered
+ufw status verbose
 
 ###############################################################################
-# SSH — NON-STANDARD PORT
+# SSH — NON-STANDARD PORT + HARDENING
 ###############################################################################
 echo ""
 echo "=== Configuring SSH ==="
@@ -234,17 +252,50 @@ if ! grep -q "^Port ${SSH_PORT}" "$SSHD_CFG"; then
 fi
 
 sed -i 's/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/' "$SSHD_CFG"
-systemctl restart sshd || systemctl restart ssh
-echo "SSH listening on ports 22 and ${SSH_PORT}"
-echo ""
-echo ">>> SSH HARDENING (do this after setting up SSH keys):"
-echo ">>>   1. Copy your public key: ssh-copy-id -p ${SSH_PORT} user@${PUBLIC_IP}"
-echo ">>>   2. Edit ${SSHD_CFG}: remove 'Port 22', set 'PasswordAuthentication no'"
-echo ">>>   3. Run: sudo ufw delete allow 22/tcp"
-echo ">>>   4. Run: sudo systemctl restart sshd"
-echo ""
-echo ">>> NOTE: SSH key bootstrap requires physical access or temporary"
-echo ">>>       password auth before the tunnel is operational."
+
+# Check if SSH keys are already in place for hardening
+REAL_USER=${SUDO_USER:-$(logname 2>/dev/null || echo root)}
+REAL_HOME=$(eval echo "~${REAL_USER}")
+AUTHORIZED_KEYS="${REAL_HOME}/.ssh/authorized_keys"
+
+if [[ -f "$AUTHORIZED_KEYS" ]] && [[ -s "$AUTHORIZED_KEYS" ]]; then
+    echo ""
+    echo "SSH authorized_keys file exists and is non-empty."
+    echo "You can now complete SSH hardening (disable password auth, close port 22)."
+    echo ""
+    read -rp "Complete SSH hardening now? [y/N]: " harden_now
+    harden_now=${harden_now:-N}
+
+    if [[ "$harden_now" =~ ^[Yy]$ ]]; then
+        # Remove Port 22, keep only non-standard port
+        sed -i '/^Port 22$/d' "$SSHD_CFG"
+        # Disable password authentication
+        sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_CFG"
+        systemctl restart sshd || systemctl restart ssh
+        # Remove UFW rule for port 22
+        ufw delete allow 22/tcp 2>/dev/null || true
+        echo "SSH hardening complete: port 22 closed, password auth disabled."
+    else
+        systemctl restart sshd || systemctl restart ssh
+        echo "SSH hardening skipped. Ports 22 and ${SSH_PORT} remain open."
+        echo ""
+        echo ">>> To complete hardening later, re-run this script and choose 'y'."
+        echo ">>> Or manually: remove 'Port 22' from ${SSHD_CFG},"
+        echo ">>>              set 'PasswordAuthentication no',"
+        echo ">>>              run 'sudo ufw delete allow 22/tcp',"
+        echo ">>>              run 'sudo systemctl restart sshd'."
+    fi
+else
+    systemctl restart sshd || systemctl restart ssh
+    echo "SSH listening on ports 22 and ${SSH_PORT}"
+    echo ""
+    echo ">>> SSH keys not yet configured. Complete these steps:"
+    echo ">>>   1. Copy your public key: ssh-copy-id -p ${SSH_PORT} ${REAL_USER}@${PUBLIC_IP}"
+    echo ">>>   2. Re-run this script to complete hardening (disable password auth, close port 22)"
+    echo ""
+    echo ">>> NOTE: SSH key bootstrap requires physical access or temporary"
+    echo ">>>       password auth before the tunnel is operational."
+fi
 
 ###############################################################################
 # HEALTH CHECK
@@ -302,6 +353,61 @@ HTEOF
 systemctl daemon-reload
 systemctl enable --now xray-health.timer
 echo "Health check timer active — view: journalctl -u xray-health"
+
+###############################################################################
+# SSH KEY BOOTSTRAP — ensure authorized_keys exists with correct permissions
+###############################################################################
+echo ""
+echo "=== SSH key bootstrap ==="
+REAL_USER=${SUDO_USER:-$(logname 2>/dev/null || echo root)}
+REAL_HOME=$(eval echo "~${REAL_USER}")
+mkdir -p "${REAL_HOME}/.ssh"
+touch "${REAL_HOME}/.ssh/authorized_keys"
+chmod 700 "${REAL_HOME}/.ssh"
+chmod 600 "${REAL_HOME}/.ssh/authorized_keys"
+chown -R "${REAL_USER}:${REAL_USER}" "${REAL_HOME}/.ssh"
+echo "Ensured ${REAL_HOME}/.ssh/authorized_keys exists with chmod 600"
+
+###############################################################################
+# SECRETS.MD — document credential generation procedure
+###############################################################################
+echo ""
+echo "=== Generating SECRETS.md ==="
+SECRETS_FILE="${REAL_HOME}/SECRETS.md"
+cat > "$SECRETS_FILE" << SDEOF
+# Credential Generation Procedure
+
+Generated by home-setup.sh on $(date -Iseconds)
+
+## Xray UUID
+Command: \`xray uuid\`
+Value: ${UUID}
+
+## REALITY x25519 Keypair
+Command: \`xray x25519\`
+Public Key: ${PUBLIC_KEY}
+Private Key: stored in /usr/local/etc/xray/config.json (chmod 600)
+
+## REALITY Short ID
+Command: \`openssl rand -hex 4\`
+Value: ${SHORT_ID}
+
+## SSH Keys
+Generated on Mac client via: \`ssh-keygen -t ed25519\`
+Authorized keys file: ${REAL_HOME}/.ssh/authorized_keys (chmod 600)
+
+## File Permissions
+- /usr/local/etc/xray/config.json: 600, owned by nobody
+- ${REAL_HOME}/.ssh/authorized_keys: 600, owned by ${REAL_USER}
+- /root/mac-setup-values.txt: 600, owned by root — DELETE after Mac setup
+
+## Regeneration
+To rotate credentials, re-run home-setup.sh. Update mac-setup.sh config block
+and Clash V-Ninja config with new values.
+SDEOF
+chmod 600 "$SECRETS_FILE"
+chown "${REAL_USER}:${REAL_USER}" "$SECRETS_FILE"
+echo "SECRETS.md written to ${SECRETS_FILE} (chmod 600)"
 
 ###############################################################################
 # SAVE VALUES

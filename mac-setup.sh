@@ -24,7 +24,7 @@ XRAY_PORT="41792"
 # VALIDATION
 ###############################################################################
 MISSING=()
-for var in HOME_IP UUID PUBLIC_KEY SHORT_ID SSH_USER VPN_NODE_NAME; do
+for var in HOME_IP UUID PUBLIC_KEY SHORT_ID SSH_USER; do
     if [[ -z "${!var}" ]]; then
         MISSING+=("$var")
     fi
@@ -41,31 +41,55 @@ fi
 REALITY_SNI="www.microsoft.com"
 
 ###############################################################################
-# CLASH V-NINJA COMPATIBILITY CHECK
+# CLASH V-NINJA COMPATIBILITY CHECK (fail-closed, per-condition gate)
 ###############################################################################
 echo "=== Clash V-Ninja compatibility check ==="
 echo ""
-echo "This script needs to know if your Clash V-Ninja app supports"
-echo "VLESS+REALITY proxies and relay proxy groups."
+echo "You must confirm THREE conditions before using Clash V-Ninja directly."
+echo "Answer each one individually. If ANY is 'n' or skipped, Scenario B is used."
 echo ""
-echo "  [A] Clash V-Ninja supports VLESS + relay (mihomo/Clash.Meta core)"
-echo "      → Config snippets will be printed for you to paste into the GUI"
-echo ""
-echo "  [B] Clash V-Ninja does NOT support these features (original Clash core)"
-echo "      → A standalone mihomo instance will be installed alongside it"
-echo ""
-read -rp "Choose [A/B]: " scenario
-scenario=${scenario^^}
 
-if [[ "$scenario" != "A" && "$scenario" != "B" ]]; then
-    echo "ERROR: Choose A or B"
-    exit 1
+COMPAT_PASS=true
+
+read -rp "1. Does Clash V-Ninja expose a raw YAML config editor (not just GUI forms)? [y/N]: " c1
+c1=${c1:-N}
+if [[ ! "$c1" =~ ^[Yy]$ ]]; then
+    COMPAT_PASS=false
+    echo "   → Condition 1 failed. Will use standalone mihomo (Scenario B)."
+fi
+
+if $COMPAT_PASS; then
+    read -rp "2. Does it accept 'type: vless' in the proxies section? [y/N]: " c2
+    c2=${c2:-N}
+    if [[ ! "$c2" =~ ^[Yy]$ ]]; then
+        COMPAT_PASS=false
+        echo "   → Condition 2 failed. Will use standalone mihomo (Scenario B)."
+    fi
+fi
+
+if $COMPAT_PASS; then
+    read -rp "3. Does it accept 'type: relay' in the proxy-groups section? [y/N]: " c3
+    c3=${c3:-N}
+    if [[ ! "$c3" =~ ^[Yy]$ ]]; then
+        COMPAT_PASS=false
+        echo "   → Condition 3 failed. Will use standalone mihomo (Scenario B)."
+    fi
+fi
+
+if $COMPAT_PASS; then
+    scenario="A"
+    echo ""
+    echo "All 3 conditions confirmed. Using Scenario A (paste config into Clash V-Ninja)."
+else
+    scenario="B"
+    echo ""
+    echo "Using Scenario B (install standalone mihomo alongside Clash V-Ninja)."
 fi
 
 PROXY_PORT="$MIHOMO_PORT"
 
 ###############################################################################
-# SCENARIO B — INSTALL STANDALONE MIHOMO
+# SCENARIO B — INSTALL + CONFIGURE + START STANDALONE MIHOMO
 ###############################################################################
 if [[ "$scenario" == "B" ]]; then
     STANDALONE_PORT="7891"
@@ -74,7 +98,6 @@ if [[ "$scenario" == "B" ]]; then
     echo "=== Installing standalone mihomo ==="
 
     if ! command -v mihomo &>/dev/null; then
-        echo "Installing mihomo via Homebrew..."
         if ! command -v brew &>/dev/null; then
             echo "ERROR: Homebrew not found. Install from https://brew.sh"
             exit 1
@@ -93,6 +116,15 @@ mode: rule
 log-level: info
 allow-lan: false
 
+sniffer:
+  enable: true
+  sniff:
+    TLS:
+      ports: [443, ${XRAY_PORT}]
+    HTTP:
+      ports: [80]
+      override-destination: true
+
 dns:
   enable: true
   listen: 127.0.0.1:1053
@@ -104,6 +136,8 @@ dns:
   fake-ip-filter:
     - "*.lan"
     - "*.local"
+  nameserver-policy:
+    "+.anthropic.com,+.claude.ai,+.openai.com,+.chatgpt.com": []
 
 proxies:
   - name: Clash-V-Ninja-Upstream
@@ -139,12 +173,10 @@ proxy-groups:
       - Clash-V-Ninja-Upstream
 
 rules:
-  # AI domains → relay through home
   - DOMAIN-SUFFIX,anthropic.com,AI-via-Home
   - DOMAIN-SUFFIX,claude.ai,AI-via-Home
   - DOMAIN-SUFFIX,openai.com,AI-via-Home
   - DOMAIN-SUFFIX,chatgpt.com,AI-via-Home
-  # SSH routing → direct through China VPN
   - IP-CIDR,${HOME_IP}/32,China-VPN,no-resolve
   ## Tier 2 — uncomment as needed (set log-level: debug to discover missing domains)
   # - DOMAIN-SUFFIX,claude.com,AI-via-Home
@@ -154,25 +186,120 @@ rules:
   # - DOMAIN-SUFFIX,statsig.anthropic.com,AI-via-Home
   # - DOMAIN-SUFFIX,intercom.io,AI-via-Home
   # - DOMAIN-SUFFIX,intercomcdn.com,AI-via-Home
-  # Everything else → direct (Clash V-Ninja handles GFW bypass separately)
   - MATCH,DIRECT
 MEOF
-
     chmod 600 "${MIHOMO_DIR}/config.yaml"
     echo "mihomo config written to ${MIHOMO_DIR}/config.yaml"
-    echo "Standalone mihomo listens on port ${STANDALONE_PORT}"
-    echo ""
-    echo "To start mihomo:"
-    echo "  mihomo -d ${MIHOMO_DIR}"
-    echo ""
-    echo "To run as a background service (launchd), create a plist or use:"
-    echo "  brew services start mihomo"
+
+    # Create launchd plist for auto-start
+    PLIST_DIR="${HOME}/Library/LaunchAgents"
+    PLIST_FILE="${PLIST_DIR}/com.mihomo.proxy.plist"
+    MIHOMO_BIN=$(command -v mihomo)
+    mkdir -p "$PLIST_DIR"
+
+    cat > "$PLIST_FILE" << LEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.mihomo.proxy</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${MIHOMO_BIN}</string>
+        <string>-d</string>
+        <string>${MIHOMO_DIR}</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${MIHOMO_DIR}/mihomo.log</string>
+    <key>StandardErrorPath</key>
+    <string>${MIHOMO_DIR}/mihomo.err</string>
+</dict>
+</plist>
+LEOF
+
+    # Stop existing instance if running, then load and start
+    launchctl bootout "gui/$(id -u)/com.mihomo.proxy" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$PLIST_FILE"
+    echo "mihomo launchd service installed and started"
+
+    # Verify port is listening
+    sleep 2
+    if lsof -iTCP:"${STANDALONE_PORT}" -sTCP:LISTEN -P -n >/dev/null 2>&1; then
+        echo "mihomo listening on port ${STANDALONE_PORT}"
+    else
+        echo "WARNING: mihomo port ${STANDALONE_PORT} not yet listening"
+        echo "Check logs: cat ${MIHOMO_DIR}/mihomo.err"
+    fi
+
+    # Generate PAC file for browser proxy routing
+    # Routes all HTTP/HTTPS through mihomo; mihomo's rules handle split routing
+    # (AI domains → relay chain, everything else → DIRECT via MATCH rule)
+    PAC_FILE="${MIHOMO_DIR}/proxy.pac"
+    cat > "$PAC_FILE" << 'PACEOF'
+function FindProxyForURL(url, host) {
+    if (isPlainHostName(host) ||
+        shExpMatch(host, "*.local") ||
+        shExpMatch(host, "*.lan") ||
+        host === "localhost" ||
+        host === "::1") {
+        return "DIRECT";
+    }
+    var ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+    var m = host.match(ipv4);
+    if (m) {
+        var a = parseInt(m[1], 10);
+        var b = parseInt(m[2], 10);
+        if (a === 127 || a === 10 || a === 0 ||
+            (a === 192 && b === 168) ||
+            (a === 172 && b >= 16 && b <= 31) ||
+            (a === 169 && b === 254)) {
+            return "DIRECT";
+        }
+    }
+    if (host.indexOf(":") !== -1) {
+        return "DIRECT";
+    }
+PACEOF
+    echo "    return \"PROXY 127.0.0.1:${STANDALONE_PORT}\";" >> "$PAC_FILE"
+    echo "}" >> "$PAC_FILE"
+    chmod 644 "$PAC_FILE"
+    echo "PAC file written to ${PAC_FILE}"
+
+    # Configure macOS system proxy to use PAC file on all active services
+    PAC_CONFIGURED=false
+    while IFS= read -r svc; do
+        [[ -z "$svc" ]] && continue
+        # Check if this service has an active IP (i.e., is actually connected)
+        if networksetup -getinfo "$svc" 2>/dev/null | grep -q "^IP address: [0-9]"; then
+            networksetup -setautoproxyurl "$svc" "file://${PAC_FILE}"
+            networksetup -setautoproxystate "$svc" on
+            echo "System proxy (PAC) configured for '${svc}'"
+            PAC_CONFIGURED=true
+        fi
+    done < <(networksetup -listallnetworkservices | tail -n +2 | grep -v '^\*')
+
+    if $PAC_CONFIGURED; then
+        echo "Browser traffic for AI domains will route through mihomo on port ${STANDALONE_PORT}"
+    else
+        echo "WARNING: No active network service detected."
+        echo "Manually set system proxy PAC URL to: file://${PAC_FILE}"
+    fi
 fi
 
 ###############################################################################
-# SCENARIO A — PRINT CONFIG SNIPPETS FOR GUI PASTE
+# SCENARIO A — PRINT CONFIG SNIPPETS FOR GUI PASTE (with DNS)
 ###############################################################################
 if [[ "$scenario" == "A" ]]; then
+    if [[ -z "$VPN_NODE_NAME" ]]; then
+        echo "ERROR: VPN_NODE_NAME is required for Scenario A."
+        echo "Set it at the top of this script to your China VPN node name in Clash V-Ninja."
+        exit 1
+    fi
     echo ""
     echo "============================================================"
     echo "  PASTE THE FOLLOWING INTO CLASH V-NINJA"
@@ -209,12 +336,10 @@ GEOF
     echo ""
     echo "=== 3. Add to 'rules:' section (BEFORE any MATCH rule) ==="
     cat << REOF
-  # Tier 1 — required for CLI and API
   - DOMAIN-SUFFIX,anthropic.com,AI-via-Home
   - DOMAIN-SUFFIX,claude.ai,AI-via-Home
   - DOMAIN-SUFFIX,openai.com,AI-via-Home
   - DOMAIN-SUFFIX,chatgpt.com,AI-via-Home
-  # SSH routing — direct to China VPN, not through relay
   - IP-CIDR,${HOME_IP}/32,${VPN_NODE_NAME},no-resolve
   ## Tier 2 — uncomment as needed (set log-level: debug to discover missing domains)
   # - DOMAIN-SUFFIX,claude.com,AI-via-Home
@@ -225,10 +350,39 @@ GEOF
   # - DOMAIN-SUFFIX,intercom.io,AI-via-Home
   # - DOMAIN-SUFFIX,intercomcdn.com,AI-via-Home
 REOF
+
+    echo ""
+    echo "=== 4. Add/merge into 'dns:' section (for no-leak DNS resolution) ==="
+    cat << DEOF
+dns:
+  enable: true
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+    - https://dns.google/dns-query
+    - https://cloudflare-dns.com/dns-query
+  fake-ip-filter:
+    - "*.lan"
+    - "*.local"
+  nameserver-policy:
+    "+.anthropic.com,+.claude.ai,+.openai.com,+.chatgpt.com": []
+DEOF
+    echo ""
+    echo "=== 5. Add/merge into top-level config (sniffer for domain detection) ==="
+    cat << SNEOF
+sniffer:
+  enable: true
+  sniff:
+    TLS:
+      ports: [443, ${XRAY_PORT}]
+    HTTP:
+      ports: [80]
+      override-destination: true
+SNEOF
 fi
 
 ###############################################################################
-# SSH SETUP
+# SSH SETUP (idempotent — updates existing entry on rerun)
 ###############################################################################
 echo ""
 echo "=== Setting up SSH ==="
@@ -240,40 +394,51 @@ if [[ ! -f ~/.ssh/id_ed25519 ]]; then
     echo "Generated SSH key: ~/.ssh/id_ed25519.pub"
 fi
 
-if [[ -f ~/.ssh/config ]] && grep -q "^Host home$" ~/.ssh/config; then
-    echo "SSH config 'home' entry already exists — skipping"
-else
-    cat >> ~/.ssh/config << SEOF
-
-Host home
+SSH_STANZA="Host home
     HostName ${HOME_IP}
     Port ${SSH_PORT}
     User ${SSH_USER}
     ProxyCommand /usr/bin/nc -X connect -x 127.0.0.1:${PROXY_PORT} %h %p
-    IdentityFile ~/.ssh/id_ed25519
-SEOF
+    IdentityFile ~/.ssh/id_ed25519"
+
+touch ~/.ssh/config
+chmod 600 ~/.ssh/config
+
+if grep -q "^Host home$" ~/.ssh/config; then
+    # Remove existing Host home stanza robustly
+    # Skips from "Host home" until the next "Host " or "Match " line or EOF
+    awk '
+        /^Host home$/ { skip=1; next }
+        /^Host / || /^Match / { skip=0 }
+        !skip { print }
+    ' ~/.ssh/config > ~/.ssh/config.tmp && mv ~/.ssh/config.tmp ~/.ssh/config
     chmod 600 ~/.ssh/config
-    echo "Added 'home' entry to ~/.ssh/config (proxy port: ${PROXY_PORT})"
 fi
 
+printf '\n%s\n' "$SSH_STANZA" >> ~/.ssh/config
+echo "SSH config 'home' entry written (proxy port: ${PROXY_PORT})"
+
 ###############################################################################
-# SHELL ALIASES
+# SHELL ALIASES (idempotent — replaces existing block on rerun)
 ###############################################################################
 echo ""
 echo "=== Setting up proxy aliases ==="
-MARKER="# AI CLI proxy aliases — tunnel via home"
+MARKER_START="# >>> AI CLI proxy aliases — tunnel via home >>>"
+MARKER_END="# <<< AI CLI proxy aliases <<<"
 
-if grep -qF "$MARKER" ~/.zshrc 2>/dev/null; then
-    echo "Proxy aliases already in ~/.zshrc — skipping"
-else
-    cat >> ~/.zshrc << AEOF
-
-${MARKER}
+ALIAS_BLOCK="${MARKER_START}
 alias claude='HTTPS_PROXY=http://127.0.0.1:${PROXY_PORT} HTTP_PROXY=http://127.0.0.1:${PROXY_PORT} claude'
 alias openai='HTTPS_PROXY=http://127.0.0.1:${PROXY_PORT} HTTP_PROXY=http://127.0.0.1:${PROXY_PORT} openai'
-AEOF
-    echo "Added proxy aliases to ~/.zshrc (port: ${PROXY_PORT})"
+${MARKER_END}"
+
+touch ~/.zshrc
+if grep -qF "$MARKER_START" ~/.zshrc; then
+    # Remove old block and replace
+    sed -i '' "/${MARKER_START//\//\\/}/,/${MARKER_END//\//\\/}/d" ~/.zshrc
 fi
+
+printf '\n%s\n' "$ALIAS_BLOCK" >> ~/.zshrc
+echo "Proxy aliases written to ~/.zshrc (port: ${PROXY_PORT})"
 
 ###############################################################################
 # NEXT STEPS
@@ -284,18 +449,19 @@ echo "  MAC SETUP COMPLETE"
 echo "============================================================"
 echo ""
 if [[ "$scenario" == "A" ]]; then
-    echo "  1. Paste the config snippets above into Clash V-Ninja GUI"
+    echo "  1. Paste ALL config snippets above into Clash V-Ninja GUI"
+    echo "     (proxies, proxy-groups, rules, dns, AND sniffer sections)"
 elif [[ "$scenario" == "B" ]]; then
-    echo "  1. Start mihomo: mihomo -d ~/.config/mihomo"
-    echo "     (or: brew services start mihomo)"
+    echo "  1. mihomo is running on port ${STANDALONE_PORT} (auto-starts on login)"
+    echo "     Browser traffic for AI domains is routed via system PAC proxy"
 fi
 echo "  2. Copy SSH key to home laptop:"
 echo "     ssh-copy-id -p ${SSH_PORT} ${SSH_USER}@${HOME_IP}"
 echo "     (route through China VPN or use physical access)"
 echo "  3. Test SSH: ssh home"
-echo "  4. Test tunnel exit IP:"
-echo "     curl --proxy http://127.0.0.1:${PROXY_PORT} https://ifconfig.me"
-echo "     (should return: ${HOME_IP})"
+echo "  4. Test tunnel routing (should succeed through home IP):"
+echo "     curl --proxy http://127.0.0.1:${PROXY_PORT} -sI https://claude.ai 2>&1 | head -5"
+echo "     (should get HTTP response, not connection refused)"
 echo "  5. Restart terminal or run: source ~/.zshrc"
 echo "  6. Test Claude: claude --version"
 echo ""
