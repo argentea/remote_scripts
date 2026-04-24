@@ -337,10 +337,28 @@ fi
 # Harden SSH if we have a key, or leave port 22 open as temporary bootstrap
 if $HAS_KEY; then
     sed -i '/^Port 22$/d' "$SSHD_CFG"
-    sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' "$SSHD_CFG"
-    systemctl restart sshd || systemctl restart ssh
-    ufw delete allow 22/tcp 2>/dev/null || true
-    echo "SSH hardening complete: port 22 closed, password auth disabled"
+
+    # Disable all password-like authentication methods
+    for directive in PasswordAuthentication KbdInteractiveAuthentication ChallengeResponseAuthentication; do
+        if grep -q "^#\?${directive}" "$SSHD_CFG"; then
+            sed -i "s/^#\?${directive}.*/${directive} no/" "$SSHD_CFG"
+        else
+            echo "${directive} no" >> "$SSHD_CFG"
+        fi
+    done
+
+    # Validate sshd config before restarting
+    if sshd -t 2>/dev/null; then
+        systemctl restart sshd || systemctl restart ssh
+    else
+        echo "ERROR: sshd config validation failed:"
+        sshd -t
+        exit 1
+    fi
+
+    # Remove UFW rule noninteractively
+    yes | ufw delete allow 22/tcp 2>/dev/null || true
+    echo "SSH hardening complete: port 22 closed, all password auth disabled"
     echo "SSH listening on port ${SSH_PORT} only (key-based auth)"
 else
     systemctl restart sshd || systemctl restart ssh
