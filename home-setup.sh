@@ -50,6 +50,7 @@ fi
 echo "=== Installing dependencies ==="
 apt-get update -qq
 apt-get install -y -qq curl openssh-server ufw openssl iproute2 procps > /dev/null
+mkdir -p /run/sshd
 systemctl enable ssh
 echo "Dependencies installed"
 
