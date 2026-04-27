@@ -260,9 +260,9 @@ for key in HandleLidSwitch HandleLidSwitchExternalPower HandleLidSwitchDocked; d
     fi
 done
 
-systemctl restart systemd-logind
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
-echo "Lid-close ignored; sleep/suspend/hibernate masked"
+echo "Lid-close settings written; sleep/suspend/hibernate masked"
+echo "  NOTE: logind.conf changes take effect after reboot (or: systemctl restart systemd-logind)"
 
 ###############################################################################
 # UFW FIREWALL
