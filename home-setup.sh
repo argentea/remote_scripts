@@ -76,7 +76,7 @@ if command -v xray &>/dev/null; then
     echo "xray already installed: $(xray version | head -1)"
 else
     # Pin to a known commit for supply-chain safety
-    XRAY_INSTALL_COMMIT="4eef24ea4151598e36a0c5b169f8e322a0e9d4a8"
+    XRAY_INSTALL_COMMIT="e741a4f56d368afbb9e5be3361b40c4552d3710d"
     XRAY_INSTALL_URL="https://github.com/XTLS/Xray-install/raw/${XRAY_INSTALL_COMMIT}/install-release.sh"
 
     TMPSCRIPT=$(mktemp)
