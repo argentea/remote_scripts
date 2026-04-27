@@ -105,7 +105,7 @@ if [[ -f "$XRAY_CONFIG" ]] && ! $ROTATE_CREDS; then
     UUID=$(grep -o '"id": *"[^"]*"' "$XRAY_CONFIG" | head -1 | sed 's/.*"\([^"]*\)"/\1/')
     PRIVATE_KEY=$(grep -o '"privateKey": *"[^"]*"' "$XRAY_CONFIG" | head -1 | sed 's/.*"\([^"]*\)"/\1/')
     SHORT_ID=$(grep -o '"shortIds": *\["[^"]*"\]' "$XRAY_CONFIG" | head -1 | sed 's/.*\["\([^"]*\)"\]/\1/')
-    PUBLIC_KEY=$(xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep "Public key:" | awk '{print $3}')
+    PUBLIC_KEY=$(xray x25519 -i "$PRIVATE_KEY" 2>/dev/null | grep -i "public" | awk '{print $NF}')
 
     if [[ -z "$UUID" || -z "$PRIVATE_KEY" || -z "$SHORT_ID" || -z "$PUBLIC_KEY" ]]; then
         echo "WARNING: Could not extract credentials from existing config. Generating new ones."
@@ -122,8 +122,8 @@ if [[ ! -f "$XRAY_CONFIG" ]] || $ROTATE_CREDS; then
     echo "=== Generating new credentials ==="
     UUID=$(xray uuid)
     KEYS=$(xray x25519)
-    PRIVATE_KEY=$(echo "$KEYS" | grep "Private key:" | awk '{print $3}')
-    PUBLIC_KEY=$(echo "$KEYS" | grep "Public key:" | awk '{print $3}')
+    PRIVATE_KEY=$(echo "$KEYS" | grep -i "private" | awk '{print $NF}')
+    PUBLIC_KEY=$(echo "$KEYS" | grep -i "public" | awk '{print $NF}')
     SHORT_ID=$(openssl rand -hex 4)
 
     echo "UUID:        ${UUID}"
