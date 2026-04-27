@@ -47,6 +47,13 @@ if [[ $EUID -ne 0 ]]; then
     exit 1
 fi
 
+echo "=== Installing dependencies ==="
+apt-get update -qq
+apt-get install -y -qq curl openssh-server ufw openssl iproute2 procps > /dev/null
+systemctl enable ssh
+echo "Dependencies installed"
+
+echo ""
 echo "=== Pre-flight checks ==="
 
 PUBLIC_IP=$(curl -s4 --max-time 10 ifconfig.me || true)
