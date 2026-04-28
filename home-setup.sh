@@ -269,6 +269,15 @@ for key in HandleLidSwitch HandleLidSwitchExternalPower HandleLidSwitchDocked; d
 done
 
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
+
+# Override GNOME power manager (it ignores logind.conf)
+REAL_USER=${SUDO_USER:-$(logname 2>/dev/null || echo root)}
+if command -v gsettings &>/dev/null; then
+    sudo -u "$REAL_USER" gsettings set org.gnome.settings-daemon.plugins.power lid-close-ac-action 'nothing' 2>/dev/null || true
+    sudo -u "$REAL_USER" gsettings set org.gnome.settings-daemon.plugins.power lid-close-battery-action 'nothing' 2>/dev/null || true
+    echo "GNOME lid-close power actions disabled"
+fi
+
 echo "Lid-close settings written; sleep/suspend/hibernate masked"
 echo "  NOTE: logind.conf changes take effect after reboot (or: systemctl restart systemd-logind)"
 
@@ -537,16 +546,16 @@ cat << PEOF
       short-id: ${SHORT_ID}
     client-fingerprint: chrome
     skip-cert-verify: false
+    dialer-proxy: <YOUR-CHINA-VPN-NODE-NAME>
 PEOF
 
 echo ""
 echo "=== 2. Add to 'proxy-groups:' section ==="
 cat << 'GEOF'
   - name: AI-via-Home
-    type: relay
+    type: select
     proxies:
-      - <YOUR-CHINA-VPN-NODE-NAME>    # first hop: get through GFW
-      - Home-USA                       # second hop: exit via home IP
+      - Home-USA
 GEOF
 
 echo ""
