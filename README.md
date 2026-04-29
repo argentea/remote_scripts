@@ -7,13 +7,15 @@ Route Claude and OpenAI traffic from a Mac in a Chinese corporate office through
 ```
 Mac (China office)
   → Clash V-Ninja (port 7890, China VPN)
-    → Home Ubuntu laptop (USA, port 41792, Xray VLESS+REALITY+Vision)
-      → claude.ai / openai.com / chatgpt.com
+    → Home router public TCP 443
+      → Home Ubuntu laptop (USA, internal port 41792, Xray VLESS+REALITY+Vision)
+        → claude.ai / openai.com / chatgpt.com
 ```
 
 - **VLESS+REALITY+Vision**: Xray protocol that mimics a real TLS handshake to `www.microsoft.com:443`, making the traffic indistinguishable from normal HTTPS
 - **Relay proxy chain**: Traffic goes Mac → China VPN (first hop, exits the firewall) → Home Xray (second hop, exits with a US IP)
 - **Split routing**: Only AI domains go through the tunnel; everything else goes direct
+- **Public port**: Use public TCP `443` for REALITY when possible. Non-443 REALITY ports can be reachable by raw TCP but still closed by upstream filtering once TLS-like ClientHello traffic is sent.
 
 ## Files
 
@@ -93,7 +95,8 @@ Save the printed values. They are also stored in `/root/mac-setup-values.txt`.
 
 Log into your router admin panel:
 
-1. **Port forward** TCP 41792 → laptop's LAN IP:41792
+1. **Recommended:** port forward external TCP 443 → laptop's LAN IP:41792
+   - If 443 is already used, external TCP 41792 → laptop's LAN IP:41792 can work, but it is more likely to be filtered.
 2. **Port forward** TCP 22222 → laptop's LAN IP:22222
 3. **DHCP reservation** — bind the laptop's LAN IP so it doesn't change
 
@@ -104,7 +107,7 @@ The LAN IP is printed by `home-setup.sh`.
 From your phone on **cellular data** (not home Wi-Fi):
 
 ```bash
-nc -zv <HOME_IP> 41792    # Xray port
+nc -zv <HOME_IP> 443      # Xray public port, if using recommended 443 forwarding
 nc -zv <HOME_IP> 22222    # SSH port
 ```
 
@@ -123,8 +126,10 @@ SSH_PORT="22222"
 SSH_USER="<your ubuntu username>"
 VPN_NODE_NAME=""          # only needed if Clash V-Ninja supports VLESS+relay (Scenario A)
 MIHOMO_PORT="7890"        # Clash V-Ninja's listen port
-XRAY_PORT="41792"
+XRAY_PORT="443"           # public router port; recommended external 443 → internal 41792
 ```
+
+If the router maps public TCP 443 to the laptop's internal TCP 41792, set `XRAY_PORT="443"` on the Mac. The Mac-side port is the public router port, not necessarily the laptop's internal listen port.
 
 ### Step 6: Run mac-setup.sh
 
@@ -132,12 +137,11 @@ XRAY_PORT="41792"
 bash mac-setup.sh
 ```
 
-It asks 3 yes/no questions about Clash V-Ninja compatibility:
+It asks 2 yes/no questions about Clash V-Ninja compatibility:
 1. Does it have a raw YAML config editor?
-2. Does it support `type: vless`?
-3. Does it support `type: relay`?
+2. Does it support `type: vless` and `dialer-proxy:`?
 
-- **All yes → Scenario A**: Prints config snippets to paste into Clash V-Ninja's YAML editor. No new software installed.
+- **Both yes → Scenario A**: Prints config snippets to paste into Clash V-Ninja's YAML editor. No new software installed.
 - **Any no → Scenario B**: Installs standalone mihomo (port 7891) alongside Clash V-Ninja, with auto-start via launchd, a PAC file for browser routing, and macOS system proxy configuration.
 
 If unsure, answer `n` — Scenario B is the safer path.
@@ -172,6 +176,10 @@ source ~/.zshrc
 # Tunnel routing
 curl --proxy http://127.0.0.1:7891 -sI https://claude.ai | head -3
 # Expected: HTTP response (200 or 301)
+
+# Claude Code OAuth/API domains
+curl --proxy http://127.0.0.1:7891 -sI https://platform.claude.com | head -3
+curl --proxy http://127.0.0.1:7891 -sI https://api.anthropic.com | head -3
 
 # SSH through tunnel
 ssh home
@@ -209,6 +217,7 @@ Both scripts are idempotent:
 | `ssh home` permission denied | Was the key installed? Check `~user/.ssh/authorized_keys` on Ubuntu |
 | mihomo not listening (7891) | Check logs: `cat ~/.config/mihomo/mihomo.err` |
 | Xray not reachable (41792) | Check router port forwarding, then `sudo ufw status` on Ubuntu |
+| SSH works but VLESS/REALITY times out | Move the public Xray port to TCP 443: router external 443 → laptop internal 41792, then set Mac `XRAY_PORT="443"` |
 | Browser doesn't use tunnel | Check system proxy: `networksetup -getautoproxyurl Wi-Fi` |
 | DNS leaking | On Ubuntu: `sudo tcpdump -i any port 53 -n` while accessing AI sites from Mac — no queries for AI domains should appear |
 | Some AI features broken | Set `log-level: debug` in mihomo config, check logs for blocked domains, uncomment Tier 2 rules |

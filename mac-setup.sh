@@ -18,7 +18,7 @@ SSH_PORT="22222"
 SSH_USER=""
 VPN_NODE_NAME=""
 MIHOMO_PORT="7890"
-XRAY_PORT="41792"
+XRAY_PORT="443"
 
 ###############################################################################
 # VALIDATION
@@ -45,7 +45,7 @@ REALITY_SNI="www.microsoft.com"
 ###############################################################################
 echo "=== Clash V-Ninja compatibility check ==="
 echo ""
-echo "You must confirm THREE conditions before using Clash V-Ninja directly."
+echo "You must confirm TWO conditions before using Clash V-Ninja directly."
 echo "Answer each one individually. If ANY is 'n' or skipped, Scenario B is used."
 echo ""
 
@@ -59,7 +59,7 @@ if [[ ! "$c1" =~ ^[Yy]$ ]]; then
 fi
 
 if $COMPAT_PASS; then
-    read -rp "2. Does it accept 'type: vless' in the proxies section? [y/N]: " c2
+    read -rp "2. Does it accept 'type: vless' and 'dialer-proxy:' in the proxies section? [y/N]: " c2
     c2=${c2:-N}
     if [[ ! "$c2" =~ ^[Yy]$ ]]; then
         COMPAT_PASS=false
@@ -68,18 +68,9 @@ if $COMPAT_PASS; then
 fi
 
 if $COMPAT_PASS; then
-    read -rp "3. Does it accept 'type: relay' in the proxy-groups section? [y/N]: " c3
-    c3=${c3:-N}
-    if [[ ! "$c3" =~ ^[Yy]$ ]]; then
-        COMPAT_PASS=false
-        echo "   → Condition 3 failed. Will use standalone mihomo (Scenario B)."
-    fi
-fi
-
-if $COMPAT_PASS; then
     scenario="A"
     echo ""
-    echo "All 3 conditions confirmed. Using Scenario A (paste config into Clash V-Ninja)."
+    echo "Both conditions confirmed. Using Scenario A (paste config into Clash V-Ninja)."
 else
     scenario="B"
     echo ""
@@ -137,7 +128,7 @@ dns:
     - "*.lan"
     - "*.local"
   nameserver-policy:
-    "+.anthropic.com,+.claude.ai,+.openai.com,+.chatgpt.com": []
+    "+.anthropic.com,+.claude.ai,+.claude.com,+.claudeusercontent.com,+.storage.googleapis.com,+.sentry.io,+.openai.com,+.chatgpt.com": []
 
 proxies:
   - name: Clash-V-Ninja-Upstream
@@ -159,12 +150,12 @@ proxies:
       short-id: ${SHORT_ID}
     client-fingerprint: chrome
     skip-cert-verify: false
+    dialer-proxy: Clash-V-Ninja-Upstream
 
 proxy-groups:
   - name: AI-via-Home
-    type: relay
+    type: select
     proxies:
-      - Clash-V-Ninja-Upstream
       - Home-USA
 
   - name: China-VPN
@@ -175,15 +166,16 @@ proxy-groups:
 rules:
   - DOMAIN-SUFFIX,anthropic.com,AI-via-Home
   - DOMAIN-SUFFIX,claude.ai,AI-via-Home
+  - DOMAIN-SUFFIX,claude.com,AI-via-Home
+  - DOMAIN-SUFFIX,claudeusercontent.com,AI-via-Home
+  - DOMAIN-SUFFIX,storage.googleapis.com,AI-via-Home
+  - DOMAIN-SUFFIX,sentry.io,AI-via-Home
   - DOMAIN-SUFFIX,openai.com,AI-via-Home
   - DOMAIN-SUFFIX,chatgpt.com,AI-via-Home
   - IP-CIDR,${HOME_IP}/32,China-VPN,no-resolve
   ## Tier 2 — uncomment as needed (set log-level: debug to discover missing domains)
-  # - DOMAIN-SUFFIX,claude.com,AI-via-Home
   # - DOMAIN-SUFFIX,oaistatic.com,AI-via-Home
   # - DOMAIN-SUFFIX,oaiusercontent.com,AI-via-Home
-  # - DOMAIN-SUFFIX,sentry.io,AI-via-Home
-  # - DOMAIN-SUFFIX,statsig.anthropic.com,AI-via-Home
   # - DOMAIN-SUFFIX,intercom.io,AI-via-Home
   # - DOMAIN-SUFFIX,intercomcdn.com,AI-via-Home
   - MATCH,DIRECT
@@ -321,15 +313,15 @@ if [[ "$scenario" == "A" ]]; then
       short-id: ${SHORT_ID}
     client-fingerprint: chrome
     skip-cert-verify: false
+    dialer-proxy: ${VPN_NODE_NAME}
 PEOF
 
     echo ""
     echo "=== 2. Add to 'proxy-groups:' section ==="
     cat << GEOF
   - name: AI-via-Home
-    type: relay
+    type: select
     proxies:
-      - ${VPN_NODE_NAME}
       - Home-USA
 GEOF
 
@@ -338,15 +330,16 @@ GEOF
     cat << REOF
   - DOMAIN-SUFFIX,anthropic.com,AI-via-Home
   - DOMAIN-SUFFIX,claude.ai,AI-via-Home
+  - DOMAIN-SUFFIX,claude.com,AI-via-Home
+  - DOMAIN-SUFFIX,claudeusercontent.com,AI-via-Home
+  - DOMAIN-SUFFIX,storage.googleapis.com,AI-via-Home
+  - DOMAIN-SUFFIX,sentry.io,AI-via-Home
   - DOMAIN-SUFFIX,openai.com,AI-via-Home
   - DOMAIN-SUFFIX,chatgpt.com,AI-via-Home
   - IP-CIDR,${HOME_IP}/32,${VPN_NODE_NAME},no-resolve
   ## Tier 2 — uncomment as needed (set log-level: debug to discover missing domains)
-  # - DOMAIN-SUFFIX,claude.com,AI-via-Home
   # - DOMAIN-SUFFIX,oaistatic.com,AI-via-Home
   # - DOMAIN-SUFFIX,oaiusercontent.com,AI-via-Home
-  # - DOMAIN-SUFFIX,sentry.io,AI-via-Home
-  # - DOMAIN-SUFFIX,statsig.anthropic.com,AI-via-Home
   # - DOMAIN-SUFFIX,intercom.io,AI-via-Home
   # - DOMAIN-SUFFIX,intercomcdn.com,AI-via-Home
 REOF
@@ -365,7 +358,7 @@ dns:
     - "*.lan"
     - "*.local"
   nameserver-policy:
-    "+.anthropic.com,+.claude.ai,+.openai.com,+.chatgpt.com": []
+    "+.anthropic.com,+.claude.ai,+.claude.com,+.claudeusercontent.com,+.storage.googleapis.com,+.sentry.io,+.openai.com,+.chatgpt.com": []
 DEOF
     echo ""
     echo "=== 5. Add/merge into top-level config (sniffer for domain detection) ==="
@@ -427,8 +420,8 @@ MARKER_START="# >>> AI CLI proxy aliases — tunnel via home >>>"
 MARKER_END="# <<< AI CLI proxy aliases <<<"
 
 ALIAS_BLOCK="${MARKER_START}
-alias claude='HTTPS_PROXY=http://127.0.0.1:${PROXY_PORT} HTTP_PROXY=http://127.0.0.1:${PROXY_PORT} claude'
-alias openai='HTTPS_PROXY=http://127.0.0.1:${PROXY_PORT} HTTP_PROXY=http://127.0.0.1:${PROXY_PORT} openai'
+alias claude='NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1 HTTPS_PROXY=http://127.0.0.1:${PROXY_PORT} HTTP_PROXY=http://127.0.0.1:${PROXY_PORT} claude'
+alias openai='NO_PROXY=localhost,127.0.0.1,::1 no_proxy=localhost,127.0.0.1,::1 HTTPS_PROXY=http://127.0.0.1:${PROXY_PORT} HTTP_PROXY=http://127.0.0.1:${PROXY_PORT} openai'
 ${MARKER_END}"
 
 touch ~/.zshrc

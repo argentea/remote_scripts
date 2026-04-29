@@ -11,6 +11,7 @@ set -euo pipefail
 # CONFIG
 ###############################################################################
 XRAY_PORT=41792
+XRAY_PUBLIC_PORT=443
 SSH_PORT=22222
 REALITY_DEST="www.microsoft.com:443"
 REALITY_SNI="www.microsoft.com"
@@ -504,7 +505,8 @@ UUID="${UUID}"
 PUBLIC_KEY="${PUBLIC_KEY}"
 SHORT_ID="${SHORT_ID}"
 SSH_PORT="${SSH_PORT}"
-XRAY_PORT="${XRAY_PORT}"
+XRAY_PORT="${XRAY_PUBLIC_PORT}"
+# The laptop listens on ${XRAY_PORT} internally. The Mac dials the router's public port.
 VEOF
 chmod 600 "$VALUES_FILE"
 
@@ -517,7 +519,8 @@ echo "  HOME SETUP COMPLETE"
 echo "============================================================"
 echo ""
 echo "  Home public IP:  ${PUBLIC_IP}"
-echo "  Xray port:       ${XRAY_PORT}"
+echo "  Xray internal port: ${XRAY_PORT}"
+echo "  Xray public port:   ${XRAY_PUBLIC_PORT} (recommended router external port)"
 echo "  SSH port:        ${SSH_PORT}"
 echo "  UUID:            ${UUID}"
 echo "  REALITY pubkey:  ${PUBLIC_KEY}"
@@ -535,7 +538,7 @@ cat << PEOF
   - name: Home-USA
     type: vless
     server: ${PUBLIC_IP}
-    port: ${XRAY_PORT}
+    port: ${XRAY_PUBLIC_PORT}
     uuid: ${UUID}
     network: tcp
     tls: true
@@ -583,10 +586,10 @@ echo "============================================================"
 echo "  MANUAL STEPS REMAINING"
 echo "============================================================"
 echo ""
-echo "  1. Router: forward TCP ${XRAY_PORT} → ${LAN_IP}:${XRAY_PORT}"
+echo "  1. Router: forward TCP ${XRAY_PUBLIC_PORT} → ${LAN_IP}:${XRAY_PORT}"
 echo "  2. Router: forward TCP ${SSH_PORT}  → ${LAN_IP}:${SSH_PORT}"
 echo "  3. Router: set DHCP reservation for ${LAN_IP}"
-echo "  4. Test from phone (cellular): nc -zv ${PUBLIC_IP} ${XRAY_PORT}"
+echo "  4. Test from phone (cellular): nc -zv ${PUBLIC_IP} ${XRAY_PUBLIC_PORT}"
 echo ""
 echo "  Then run mac-setup.sh on your Mac."
 echo "============================================================"
