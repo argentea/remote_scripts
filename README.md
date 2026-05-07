@@ -157,6 +157,7 @@ If unsure, answer `n` — Scenario B is the safer path.
 | macOS system proxy | PAC URL set on all active network services |
 | `~/.ssh/id_ed25519` | Generated if missing |
 | `~/.ssh/config` | `Host home` entry with ProxyCommand through tunnel |
+| `~/.ssh/config` | `Host home` keepalive settings to survive the proxy path |
 | `~/.zshrc` | Proxy-wrapped `claude` and `openai` aliases |
 
 #### What It Changes (Scenario A)
@@ -214,6 +215,7 @@ Both scripts are idempotent:
 |---------|-------|
 | `curl` through proxy hangs | Is Clash V-Ninja running? `lsof -iTCP:7890 -sTCP:LISTEN` |
 | `ssh home` connection refused | Verify port forwarding: `nc -zv <HOME_IP> 22222` from phone |
+| `ssh home` logs in, then closes after ~20s | The SOCKS tunnel is timing out; set `ServerAliveInterval 5` in `~/.ssh/config`, restart the `com.home.ssh-socks` LaunchAgent, and confirm `127.0.0.1:10880` stays up |
 | `ssh home` permission denied | Was the key installed? Check `~user/.ssh/authorized_keys` on Ubuntu |
 | mihomo not listening (7891) | Check logs: `cat ~/.config/mihomo/mihomo.err` |
 | Xray not reachable (41792) | Check router port forwarding, then `sudo ufw status` on Ubuntu |

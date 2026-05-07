@@ -392,7 +392,10 @@ SSH_STANZA="Host home
     Port ${SSH_PORT}
     User ${SSH_USER}
     ProxyCommand /usr/bin/nc -X connect -x 127.0.0.1:${PROXY_PORT} %h %p
-    IdentityFile ~/.ssh/id_ed25519"
+    IdentityFile ~/.ssh/id_ed25519
+    ServerAliveInterval 5
+    ServerAliveCountMax 6
+    TCPKeepAlive yes"
 
 touch ~/.ssh/config
 chmod 600 ~/.ssh/config
@@ -452,6 +455,7 @@ echo "  2. Copy SSH key to home laptop:"
 echo "     ssh-copy-id -p ${SSH_PORT} ${SSH_USER}@${HOME_IP}"
 echo "     (route through China VPN or use physical access)"
 echo "  3. Test SSH: ssh home"
+echo "     If SSH logs in and then drops after ~20s, confirm ServerAliveInterval is 5"
 echo "  4. Test tunnel routing (should succeed through home IP):"
 echo "     curl --proxy http://127.0.0.1:${PROXY_PORT} -sI https://claude.ai 2>&1 | head -5"
 echo "     (should get HTTP response, not connection refused)"
