@@ -2,3 +2,5 @@ draft.md
 plan.md
 .humanize
 SECRETS.md
+__pycache__/
+*.pyc
